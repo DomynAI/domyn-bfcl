@@ -1,0 +1,50 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+
+      - id: check-json
+
+      - id: check-toml
+
+      - id: check-merge-conflict
+
+      - id: check-case-conflict
+
+      - id: detect-private-key
+
+      - id: end-of-file-fixer
+        # Whitespace in chat templates is part of the prompt
+        exclude: \.(svg|jinja)$
+
+      - id: mixed-line-ending
+        args: [--fix=lf]
+        exclude: \.bat$
+
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+        exclude: \.jinja$
+
+      - id: check-added-large-files
+        args: ["--maxkb=2000"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: pyright
+        name: pyright
+        entry: pyright
+        language: node
+        language_version: lts
+        additional_dependencies: ["pyright@1.1.414"]
+        types: [python]
+        pass_filenames: false

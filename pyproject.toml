@@ -1,0 +1,145 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "domyn-bfcl"
+version = "0.1.0"
+description = "Domyn additions to the Berkeley Function Calling Leaderboard (bfcl-eval)"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+    "bfcl-eval==2026.3.23",
+    "jinja2",
+    "pydantic>=2",
+    # Imported by qwen_agent (a bfcl-eval dependency) but not declared by bfcl-eval.
+    "soundfile",
+    # Only the memory categories' small text encoder uses it; CPU wheels save ~5 GB of CUDA libraries.
+    "torch",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[project.scripts]
+domyn-bfcl = "domyn_bfcl.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["domyn_bfcl*"]
+
+[tool.setuptools.package-data]
+"domyn_bfcl.handlers" = ["*.jinja"]
+
+[tool.uv]
+# Resolution cutoff of the lock; move it when bumping.
+exclude-newer = "2026-10-22T09:43:00Z"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.ruff]
+line-length = 120
+force-exclude = true
+extend-exclude = [".ipynb_checkpoints"]
+
+[tool.ruff.lint]
+# CPY001 is a preview rule; explicit-preview-rules enables only the preview rules listed by name
+preview = true
+explicit-preview-rules = true
+extend-select = ["CPY001"]
+select = [
+    "F",
+    "E",
+    "W",
+    "C90",
+    "I",
+    "N",
+    "D",
+    "UP",
+    "YTT",
+    "ANN",
+    "BLE",
+    "FBT",
+    "B",
+    "B9",
+    "A",
+    "C4",
+    "T10",
+    "EM",
+    "ISC",
+    "ICN",
+    "LOG",
+    "G",
+    "PT",
+    "RSE",
+    "RET",
+    "SLF",
+    "SIM",
+    "ARG",
+    "PTH",
+    "TRY",
+    "NPY",
+    "PERF",
+    "RUF",
+]
+ignore = [
+    # Missing docstring in public package
+    "D100",
+    # Missing docstring in public module
+    "D104",
+    # Not supported by Pydantic
+    "UP046",
+    # Caching default value is set in the decorator
+    "FBT001",
+    # Ray type hint is not compatible with paths
+    "PTH207",
+    # Not supported by enums
+    "RUF012",
+]
+
+[tool.ruff.lint.extend-per-file-ignores]
+# Ignore unused imports
+"__init__.py" = ["F401"]
+# Ignore pydocstyle rules for tests
+# Tests can access private functions
+# Tests do not need type annotations or copyright headers
+# Stubs keep the signatures of what they replace
+"tests/*" = ["D", "SLF001", "ANN", "ARG", "FBT", "CPY001"]
+# Handlers and patches override upstream's untyped methods and keep their signatures
+"domyn_bfcl/handlers/*" = ["ANN", "ARG002", "FBT002", "D102", "N802"]
+"domyn_bfcl/install.py" = ["ANN", "ARG", "FBT002", "N802"]
+
+[tool.ruff.lint.flake8-annotations]
+# `__init__` needs no `-> None` once its arguments are typed
+mypy-init-return = true
+
+[tool.ruff.lint.flake8-copyright]
+notice-rgx = "SPDX-FileCopyrightText: \\d{4} Domyn"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pyright]
+include = ["domyn_bfcl"]
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+    ".git",
+    "**/build",
+    "env/**",
+    ".venv",
+    "**/.*",
+]
+defineConstant = { DEBUG = true }
+reportMissingImports = "error"
+reportMissingTypeStubs = false
+
+pythonPlatform = "Linux"
+venvPath = "."
+venv = ".venv"
