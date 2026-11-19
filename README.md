@@ -39,7 +39,7 @@ uv run domyn-bfcl evaluate --model Domyn/Domyn-Edge-FC --test-category single_tu
 
 Every `bfcl` command and option works. `--generation-config` takes the run's sampling
 parameters, thinking mode (`reasoning`, `chat_template_kwargs`), completion budget
-(`max_tokens`, `max_model_len`, `token_safety_margin`) and `request_timeout`; unset sampling
+(`max_tokens`, `max_model_len`) and `request_timeout`; unset sampling
 parameters are left to the server. The endpoint's key is `$REMOTE_OPENAI_API_KEY`, else `$API_KEY`.
 Requests name the model by the HF id or local path that BFCL loads the tokenizer from; set
 `$REMOTE_OPENAI_MODEL` when the endpoint serves it under another name.

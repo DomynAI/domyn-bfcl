@@ -30,7 +30,6 @@ class GenerationConfig(BaseModel):
     reasoning: bool = True
     max_model_len: int | None = None
     max_tokens: int | None = None
-    token_safety_margin: int = 256
     request_timeout: float = 3600
     max_samples: int = -1
 

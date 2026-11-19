@@ -22,7 +22,7 @@ Every row is a deliberate choice; nothing else differs.
 | What | Upstream | domyn-bfcl | Where | Changes scores? |
 | --- | --- | --- | --- | --- |
 | Sampling | `temperature` only (`--temperature`, default 0.001) | `temperature`, `top_p`, `presence_penalty` + vLLM extras `top_k`, `min_p`, `repetition_penalty`, `frequency_penalty`, `chat_template_kwargs` from `[generation]`; unset values are not sent (server defaults). Upstream's handlers get `temperature` as `generate --temperature` | `config.py`, `oss.py`, `__main__.py` | Yes |
-| Completion budget (OSS handlers) | `min(4096, window − prompt)` | largest completion that fits the served window (`fit_max_tokens`, honours `max_tokens` / `max_model_len` / `token_safety_margin`) | `oss.py` | Yes (no truncation at 4096) |
+| Completion budget (OSS handlers) | `min(4096, window − prompt)` | largest completion that fits the served window, however small (`fit_max_tokens`, honours `max_tokens` / `max_model_len`; an estimated prompt keeps half the estimate free); a prompt that leaves no room is not sent: the entry ends with an empty result, scored as wrong | `oss.py` | Yes (no truncation at 4096) |
 | Failed entries on resume | kept; score as wrong (or as correct abstention in irrelevance) | regenerated (`"Error during inference..."` results are dropped first) | `generation.py`, `install.py` (collect_test_cases) | Yes, on resumed runs |
 | `max_samples` | — | first N per category (+ memory prerequisites), scored with `--partial-eval` | `generation.py` | Smoke runs only |
 | Web search | SerpAPI (DuckDuckGo engine) | Brave Search API (`BRAVE_API_KEY`), shared rate limit, 429 backoff capped at 900 s, region → Brave locale | `web_search.py` | Yes (different engine) |
@@ -55,7 +55,7 @@ which `generate` gets as `--temperature` (an explicit `--temperature` must match
 | `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `repetition_penalty`, `frequency_penalty` | unset | sampling; unset is not sent |
 | `chat_template_kwargs` | unset | sent to the chat template as given, with `enable_thinking` set from the thinking mode (`DomynHandler` also defaults `preserve_thinking` to on) |
 | `reasoning` | `true` | the thinking mode when `chat_template_kwargs` has no `enable_thinking` |
-| `max_model_len`, `max_tokens`, `token_safety_margin` | unset, unset, 256 | completion budget |
+| `max_model_len`, `max_tokens` | unset, unset | completion budget |
 | `request_timeout` | 3600 | seconds per request |
 | `max_samples` | -1 (all) | first N per category |
 

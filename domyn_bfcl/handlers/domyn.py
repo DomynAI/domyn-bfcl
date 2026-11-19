@@ -139,12 +139,12 @@ class DomynHandler(DomynOSSMixin):
         }
 
     def _count_prompt(self, messages: list[dict], tools: list[dict]) -> tuple[int, int]:
-        """``(prompt tokens, safety margin)``, rendered as the server will render it.
+        """``(prompt tokens, margin)``, rendered as the server will render it.
 
-        A prompt the template cannot render is estimated from its characters instead;
-        the estimate misses the template's own tokens, so its margin grows with it.
+        That count is exact, so its margin is 0. A prompt the template cannot render is
+        estimated from its characters instead; the estimate misses the template's own
+        tokens, so it keeps half the estimate free.
         """
-        margin = self.generation_config.token_safety_margin
         try:
             prompt = self.tokenizer.apply_chat_template(
                 conversation=messages,
@@ -161,8 +161,8 @@ class DomynHandler(DomynOSSMixin):
                 f"({type(exc).__name__}: {exc}); budgeting max_tokens on a "
                 f"chars//{CHARS_PER_TOKEN} estimate of {estimate} tokens"
             )
-            return estimate, max(margin, estimate // 2)
-        return len(prompt), margin
+            return estimate, estimate // 2
+        return len(prompt), 0
 
     # -------------------------------------------------------------------------
     # Inference: chat completions with tools
