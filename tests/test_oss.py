@@ -10,7 +10,7 @@ from bfcl_eval.model_handler.local_inference.base_oss_handler import OSSHandler
 
 from domyn_bfcl import config, models
 from domyn_bfcl.models import DomynQwenFCHandler
-from domyn_bfcl.oss import DomynOSSMixin, fit_max_tokens
+from domyn_bfcl.oss import ContextWindowFullError, DomynOSSMixin, fit_max_tokens
 
 GENERATION_CONFIG = {
     "temperature": 0.6,
@@ -23,7 +23,6 @@ GENERATION_CONFIG = {
     "max_samples": 2,
     "max_tokens": None,
     "max_model_len": 1000,
-    "token_safety_margin": 256,
     "request_timeout": 123,
 }
 
@@ -86,22 +85,34 @@ def test_sampling_comes_from_generation_config():
 
 def test_max_tokens_is_the_budget_that_fits_the_window():
     (call,), _ = _query(_handler(), prompt="a b c")
-    # 1000 window - 3 prompt tokens - the margin
-    assert call.kwargs["max_tokens"] == 997 - GENERATION_CONFIG["token_safety_margin"]
+    # 1000 window - 3 prompt tokens, counted exactly: no margin
+    assert call.kwargs["max_tokens"] == 997
 
 
 @pytest.mark.parametrize(
     ("max_tokens", "prompt_tokens", "expected"),
     [
-        (None, 100, 644),  # unset: the whole window the prompt leaves
-        (0, 100, 644),
+        (None, 100, 900),  # unset: the whole window the prompt leaves
+        (0, 100, 900),
         (500, 100, 500),  # fits: sent as is
-        (900, 100, 644),  # cut to the room left
-        (500, 1000, 1),  # the prompt alone fills the window
+        (950, 100, 900),  # cut to the room left
+        (500, 999, 1),  # however little is left, it is used
     ],
 )
 def test_fit_max_tokens(max_tokens, prompt_tokens, expected):
-    assert fit_max_tokens(max_tokens, prompt_tokens, 1000, margin=256) == expected
+    assert fit_max_tokens(max_tokens, prompt_tokens, 1000) == expected
+
+
+def test_fit_max_tokens_keeps_an_estimates_margin():
+    assert fit_max_tokens(None, 100, 1000, margin=256) == 644
+
+
+@pytest.mark.parametrize("prompt_tokens", [1000, 1200])
+def test_a_prompt_that_fills_the_window_is_not_sent(prompt_tokens):
+    handler = _handler()
+    with pytest.raises(ContextWindowFullError, match="leaves no room"):
+        _query(handler, prompt=" ".join(["t"] * prompt_tokens))
+    handler.client.completions.create.assert_not_called()
 
 
 def test_token_id_prompts_are_counted_and_logged():
@@ -128,6 +139,24 @@ def test_requests_name_the_served_model(monkeypatch):
     monkeypatch.setattr(OSSHandler, "inference", lambda self, *args: (self.model_path_or_id, {}))
     monkeypatch.setenv("REMOTE_OPENAI_MODEL", "served-id")
     assert handler.inference({"id": "simple_python_0"}, False, False)[0] == "served-id"
+
+
+def test_an_entry_that_fills_the_window_ends_with_an_empty_final_result(monkeypatch):
+    handler = _handler()
+
+    def inference(self, *args):
+        # A first turn is answered; the second turn's prompt fills the window
+        self._record_finish(SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop")]))
+        msg = "the 1200-token prompt leaves no room in the 1000-token window"
+        raise ContextWindowFullError(msg)
+
+    monkeypatch.setattr(OSSHandler, "inference", inference)
+    result, metadata = handler.inference({"id": "multi_turn_base_0"}, False, False)
+    assert result == ""  # not "Error during inference: ...", which a resume would regenerate
+    assert metadata == {
+        "context_window_full": "the 1200-token prompt leaves no room in the 1000-token window",
+        "finish_reason": ["stop", "length"],
+    }
 
 
 def _finishing(*reasons):
