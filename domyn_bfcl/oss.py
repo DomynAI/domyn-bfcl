@@ -129,6 +129,7 @@ class DomynOSSMixin(OSSHandler):
         if served_model := os.getenv("REMOTE_OPENAI_MODEL"):
             self.model_path_or_id = served_model
         _entry.finish_reasons = finish_reasons = []
+        metadata: dict[str, Any]
         try:
             result, metadata = super().inference(test_entry, include_input_log, exclude_state_log)
         except ContextWindowFullError as exc:
