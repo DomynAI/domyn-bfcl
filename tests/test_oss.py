@@ -85,7 +85,7 @@ def test_sampling_comes_from_generation_config():
 
 def test_max_tokens_is_the_budget_that_fits_the_window():
     (call,), _ = _query(_handler(), prompt="a b c")
-    # 1000 window - 3 prompt tokens, counted exactly: no margin
+    # 1000 window - 3 prompt tokens
     assert call.kwargs["max_tokens"] == 997
 
 
@@ -101,10 +101,6 @@ def test_max_tokens_is_the_budget_that_fits_the_window():
 )
 def test_fit_max_tokens(max_tokens, prompt_tokens, expected):
     assert fit_max_tokens(max_tokens, prompt_tokens, 1000) == expected
-
-
-def test_fit_max_tokens_keeps_an_estimates_margin():
-    assert fit_max_tokens(None, 100, 1000, margin=256) == 644
 
 
 @pytest.mark.parametrize("prompt_tokens", [1000, 1200])

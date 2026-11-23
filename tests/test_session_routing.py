@@ -19,7 +19,7 @@ from domyn_bfcl.oss import DomynOSSMixin
 @pytest.fixture
 def handler():
     handler = DomynHandler.__new__(DomynHandler)
-    handler.generation_config = GenerationConfig(session_routing=True, token_safety_margin=1, temperature=0)
+    handler.generation_config = GenerationConfig(session_routing=True, temperature=0)
     handler.model_path_or_id = "m"
     handler.max_context_length = 100
     handler.tokenizer = MagicMock()
