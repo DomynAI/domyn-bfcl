@@ -119,7 +119,7 @@ class OlmoFCHandler(DomynOSSMixin):
     def _pre_query_processing_prompting(self, test_entry: dict) -> dict:
         functions: list = test_entry["function"]
         # FC models use its own system prompt, so no need to add any message
-        return {"message": [], "function": functions}
+        return {"message": [], "function": functions, **self._session_data(test_entry)}
 
     @override
     def _parse_query_response_prompting(self, api_response: Any) -> dict:

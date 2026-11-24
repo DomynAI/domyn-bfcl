@@ -33,6 +33,7 @@ class GenerationConfig(BaseModel):
     token_safety_margin: int = 256
     request_timeout: float = 3600
     max_samples: int = -1
+    session_routing: bool = False
 
     @property
     def enable_thinking(self) -> bool:

@@ -17,6 +17,10 @@ Divergences from upstream ``bfcl_eval.model_handler.local_inference.base_oss_han
 - Finish reasons: each result entry gets ``finish_reason``, the server's reason for
   every request of the entry, in order (upstream records none, so a completion cut by
   ``max_tokens`` cannot be told from one that stopped).
+- Session routing: with ``session_routing`` (the model is served by a swarm), each
+  inference call keeps one random session ID, sent in ``X-Session-ID`` and
+  ``session_params.session_id``; single-turn calls also send
+  ``X-Dynamo-Session-Final: true`` (upstream sends neither).
 
 Upstream handlers are used through a composed class, e.g.
 ``class DomynQwenFCHandler(DomynOSSMixin, QwenFCHandler)``.
@@ -26,9 +30,11 @@ import json
 import os
 import threading
 import time
+import uuid
 from typing import Any
 
 from bfcl_eval.model_handler.local_inference.base_oss_handler import OSSHandler
+from bfcl_eval.utils import contain_multi_turn_interaction
 from openai import OpenAI
 from openai.types import Completion
 from openai.types.chat import ChatCompletion
@@ -115,6 +121,35 @@ class DomynOSSMixin(OSSHandler):
         if (finish_reasons := getattr(_entry, "finish_reasons", None)) is not None:
             finish_reasons.append(api_response.choices[0].finish_reason)
 
+    def _session_data(self, test_entry: dict) -> dict:
+        """The entry's swarm session, kept in its inference data: ``(id, final)``; none without session routing.
+
+        A new ID per inference call, so concurrent entries never share one. ``final`` marks a
+        single-turn entry, whose only request ends the session.
+        """
+        if not self.generation_config.session_routing:
+            return {}
+        return {"_swarm_session": (uuid.uuid4().hex, not contain_multi_turn_interaction(test_entry["id"]))}
+
+    @override
+    def _pre_query_processing_prompting(self, test_entry: dict) -> dict:
+        return {**super()._pre_query_processing_prompting(test_entry), **self._session_data(test_entry)}
+
+    @staticmethod
+    def _session_request_options(inference_data: dict, extra_body: dict) -> dict[str, Any]:
+        """``extra_headers`` and ``extra_body`` of a request, with the entry's session if it has one."""
+        session = inference_data.get("_swarm_session")
+        if session is None:
+            return {"extra_body": extra_body} if extra_body else {}
+        session_id, final = session
+        headers = {"X-Session-ID": session_id}
+        if final:
+            headers["X-Dynamo-Session-Final"] = "true"
+        return {
+            "extra_headers": headers,
+            "extra_body": {**extra_body, "session_params": {"session_id": session_id}},
+        }
+
     def _budget_completion(self, input_token_count: int, margin: int) -> int:
         """Completion budget that fits the served context window.
 
@@ -173,8 +208,8 @@ class DomynOSSMixin(OSSHandler):
             model=self.model_path_or_id,
             prompt=formatted_prompt,
             max_tokens=leftover_tokens_count,
-            extra_body=extra_body or None,
             **sampling_kwargs,
+            **self._session_request_options(inference_data, extra_body),
         )
         end_time = time.time()
         self._record_finish(api_response)
