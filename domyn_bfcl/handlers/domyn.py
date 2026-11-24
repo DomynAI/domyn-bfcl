@@ -23,13 +23,8 @@ from openai import (
 from openai.types.chat import ChatCompletion
 from overrides import override
 from tenacity import stop_after_attempt
-from tqdm import tqdm
 
-from domyn_bfcl.oss import (
-    CHARS_PER_TOKEN,
-    DomynOSSMixin,
-    estimate_prompt_tokens,
-)
+from domyn_bfcl.oss import DomynOSSMixin
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 _FUNCTION_RE = re.compile(r"<function=([^>\s]+)>(.*?)</function>", re.DOTALL)
@@ -138,31 +133,21 @@ class DomynHandler(DomynOSSMixin):
             "enable_thinking": generation.enable_thinking,
         }
 
-    def _count_prompt(self, messages: list[dict], tools: list[dict]) -> tuple[int, int]:
-        """``(prompt tokens, safety margin)``, rendered as the server will render it.
+    def _count_prompt(self, messages: list[dict], tools: list[dict]) -> int:
+        """The prompt's tokens, rendered as the server will render it.
 
-        A prompt the template cannot render is estimated from its characters instead;
-        the estimate misses the template's own tokens, so its margin grows with it.
+        A prompt the chat template cannot render raises, and the entry fails as an
+        inference error: the server renders it with the same template.
         """
-        margin = self.generation_config.token_safety_margin
-        try:
-            prompt = self.tokenizer.apply_chat_template(
-                conversation=messages,
-                tools=tools or None,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_dict=False,
-                **self._chat_template_kwargs(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            estimate = estimate_prompt_tokens(messages, tools)
-            tqdm.write(
-                f"⚠️  Warning: could not render the prompt with the chat template "
-                f"({type(exc).__name__}: {exc}); budgeting max_tokens on a "
-                f"chars//{CHARS_PER_TOKEN} estimate of {estimate} tokens"
-            )
-            return estimate, max(margin, estimate // 2)
-        return len(prompt), margin
+        prompt = self.tokenizer.apply_chat_template(
+            conversation=messages,
+            tools=tools or None,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=False,
+            **self._chat_template_kwargs(),
+        )
+        return len(prompt)
 
     # -------------------------------------------------------------------------
     # Inference: chat completions with tools
@@ -207,7 +192,7 @@ class DomynHandler(DomynOSSMixin):
         # Keep prompt + completion inside the context window, counted with the tokenizer
         # BFCL loaded at setup and the template flags the request renders with. No local
         # default: an unset max_tokens means "as much as the window allows".
-        kwargs["max_tokens"] = self._budget_completion(*self._count_prompt(messages, tools))
+        kwargs["max_tokens"] = self._budget_completion(self._count_prompt(messages, tools))
 
         kwargs.update(self._session_request_options(inference_data, kwargs["extra_body"]))
         api_response, latency = self.generate_with_backoff(**kwargs)

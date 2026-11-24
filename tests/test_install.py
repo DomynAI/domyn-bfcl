@@ -89,7 +89,7 @@ def test_handlers_built_by_upstream_get_the_generation_config(installed):
     assert handler.generation_config == config.GenerationConfig(temperature=0.3, top_p=0.9)
 
 
-@pytest.mark.parametrize("generation_config", [{"enable_thinking": False}, {"token_safety_margin": "many"}])
+@pytest.mark.parametrize("generation_config", [{"enable_thinking": False}, {"max_tokens": "many"}])
 def test_install_rejects_an_invalid_generation_config(installed, generation_config):
     with pytest.raises(ValidationError):
         install(generation_config)

@@ -6,7 +6,10 @@
 Divergences from upstream ``bfcl_eval.model_handler.local_inference.base_oss_handler``:
 
 - Completion budget: ``max_tokens`` is the largest completion that fits the served
-  window (``fit_max_tokens``; upstream caps it at 4096).
+  window (``fit_max_tokens``; upstream caps it at 4096), however small. A prompt that
+  leaves no room is not sent: the entry ends there with an empty result, scored as
+  wrong, and finish reason ``length``. It is not an inference error, which a resume would
+  regenerate (``generation.py``): it would fill the window again.
 - Sampling: temperature, top_p and presence_penalty come from ``config.GENERATION``,
   plus an allowlist of vLLM sampling extras; unset (None) values are not sent, so the
   server's defaults apply (upstream sends temperature only, default 0.001).
@@ -26,7 +29,6 @@ Upstream handlers are used through a composed class, e.g.
 ``class DomynQwenFCHandler(DomynOSSMixin, QwenFCHandler)``.
 """
 
-import json
 import os
 import threading
 import time
@@ -52,24 +54,25 @@ SAMPLING_EXTRA_KEYS = (
 )
 
 
-# Rough characters per token, for a prompt the tokenizer cannot count
-CHARS_PER_TOKEN = 4
-
 # The entry each thread is generating: BFCL runs entries in parallel threads on one handler.
 _entry = threading.local()
 
 
-def estimate_prompt_tokens(messages: list[dict], tools: list[dict] | None) -> int:
-    """The prompt's length from its characters (message contents and tool schemas)."""
-    chars = sum(len(str(message.get("content") or "")) for message in messages)
-    chars += len(json.dumps(tools)) if tools else 0
-    return chars // CHARS_PER_TOKEN
+class ContextWindowFullError(RuntimeError):
+    """The prompt leaves no room for a completion: the entry stops here, without sending it."""
 
 
-def fit_max_tokens(max_tokens: int | None, prompt_tokens: int, window: int, margin: int) -> int:
-    """``max_tokens`` (unset: the whole window) cut to what the prompt leaves of the window, at least 1."""
-    room = window - prompt_tokens - margin
-    return max(1, min(max_tokens or room, room))
+def fit_max_tokens(max_tokens: int | None, prompt_tokens: int, window: int) -> int:
+    """``max_tokens`` (unset: the whole window) cut to what the prompt leaves of the window.
+
+    The prompt is counted with the tokenizer, so every token it leaves is used. Raises
+    ``ContextWindowFullError`` when it leaves none.
+    """
+    room = window - prompt_tokens
+    if room <= 0:
+        msg = f"the {prompt_tokens}-token prompt leaves no room in the {window}-token window"
+        raise ContextWindowFullError(msg)
+    return min(max_tokens or room, room)
 
 
 class DomynOSSMixin(OSSHandler):
@@ -105,13 +108,22 @@ class DomynOSSMixin(OSSHandler):
 
     @override
     def inference(self, test_entry: dict, include_input_log: bool, exclude_state_log: bool) -> tuple[Any, dict]:
-        """Upstream's, on the served model id, with the entry's finish reasons in its metadata."""
+        """Upstream's, on the served model id, with the entry's finish reasons in its metadata.
+
+        An entry whose prompt fills the context window ends with an empty result and a final ``length`` finish
+        reason, and the reason in ``context_window_full``.
+        """
         # spin_up_local_server (final upstream) points model_path_or_id at the local path
         # or HF id it loads the tokenizer from; requests must name what the server serves.
         if served_model := os.getenv("REMOTE_OPENAI_MODEL"):
             self.model_path_or_id = served_model
         _entry.finish_reasons = finish_reasons = []
-        result, metadata = super().inference(test_entry, include_input_log, exclude_state_log)
+        metadata: dict[str, Any]
+        try:
+            result, metadata = super().inference(test_entry, include_input_log, exclude_state_log)
+        except ContextWindowFullError as exc:
+            result, metadata = "", {"context_window_full": str(exc)}
+            finish_reasons.append("length")
         metadata["finish_reason"] = finish_reasons
         return result, metadata
 
@@ -150,7 +162,7 @@ class DomynOSSMixin(OSSHandler):
             "extra_body": {**extra_body, "session_params": {"session_id": session_id}},
         }
 
-    def _budget_completion(self, input_token_count: int, margin: int) -> int:
+    def _budget_completion(self, input_token_count: int) -> int:
         """Completion budget that fits the served context window.
 
         ``max_context_length`` is the architecture's limit (from the model config);
@@ -161,12 +173,7 @@ class DomynOSSMixin(OSSHandler):
             self.generation_config.max_model_len or self.max_context_length,
             self.max_context_length,
         )
-        return fit_max_tokens(
-            self.generation_config.max_tokens,
-            input_token_count,
-            window,
-            margin,
-        )
+        return fit_max_tokens(self.generation_config.max_tokens, input_token_count, window)
 
     def _sampling_kwargs(self) -> tuple[dict[str, Any], dict[str, Any]]:
         """``(request kwargs, extra_body)`` sampling parameters, None values left out."""
@@ -195,7 +202,7 @@ class DomynOSSMixin(OSSHandler):
             input_token_count = len(self.tokenizer.tokenize(formatted_prompt))
         inference_data["inference_input_log"] = {"formatted_prompt": prompt_for_log}
 
-        leftover_tokens_count = self._budget_completion(input_token_count, self.generation_config.token_safety_margin)
+        leftover_tokens_count = self._budget_completion(input_token_count)
 
         sampling_kwargs, extra_body = self._sampling_kwargs()
         if hasattr(self, "stop_token_ids"):

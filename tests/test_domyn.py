@@ -19,7 +19,7 @@ from domyn_bfcl.config import GenerationConfig
 from domyn_bfcl.handlers.domyn import (
     DomynHandler,
 )
-from domyn_bfcl.oss import estimate_prompt_tokens
+from domyn_bfcl.oss import ContextWindowFullError
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DomynHandler — request construction & response parsing
@@ -64,7 +64,6 @@ _FUNCTIONS = [
 ]
 
 _GEN_CONFIG = {
-    "token_safety_margin": 256,
     "temperature": 0.7,
     "top_p": 0.9,
     "chat_template_kwargs": {"enable_thinking": False},
@@ -132,30 +131,34 @@ def test_query_leaves_unset_sampling_params_to_the_server():
 
 def test_query_without_max_model_len_budgets_against_the_architecture_window():
     """As the completions handlers do (DomynOSSMixin._budget_completion)."""
-    # 131072 max_context_length - 50 prompt (stubbed tokenizer) - 256 margin
-    assert _captured_kwargs(_make_handler())["max_tokens"] == 130766
+    # 131072 max_context_length - 50 prompt (stubbed tokenizer)
+    assert _captured_kwargs(_make_handler())["max_tokens"] == 131022
 
 
 def test_query_the_smaller_window_binds():
     cfg = {**_GEN_CONFIG, "max_model_len": 262144}
-    assert _captured_kwargs(_make_handler(cfg))["max_tokens"] == 130766
+    assert _captured_kwargs(_make_handler(cfg))["max_tokens"] == 131022
 
 
 def test_query_max_tokens_fills_the_window_by_default():
     cfg = {**_GEN_CONFIG, "max_model_len": 8192}
-    # 8192 window - 50 prompt (stubbed tokenizer) - 256 margin
-    assert _captured_kwargs(_make_handler(cfg))["max_tokens"] == 7886
+    # 8192 window - 50 prompt (stubbed tokenizer)
+    assert _captured_kwargs(_make_handler(cfg))["max_tokens"] == 8142
 
 
-def test_query_estimates_a_prompt_the_template_cannot_render(capsys):
+def test_query_a_prompt_that_fills_the_window_is_not_sent():
+    handler = _make_handler({**_GEN_CONFIG, "max_model_len": 50})  # the 50-token prompt fills it
+    with pytest.raises(ContextWindowFullError):
+        _captured_kwargs(handler)
+    handler.client.chat.completions.create.assert_not_called()
+
+
+def test_query_a_prompt_the_template_cannot_render_is_an_error():
     handler = _make_handler({**_GEN_CONFIG, "max_model_len": 32768})
     handler.tokenizer.apply_chat_template.side_effect = ValueError("bad template")
-    kwargs = _captured_kwargs(handler)
-    estimate = estimate_prompt_tokens(kwargs["messages"], kwargs["tools"])
-    # an estimate keeps half its size free when that exceeds the configured margin
-    margin = max(256, estimate // 2)
-    assert kwargs["max_tokens"] == 32768 - estimate - margin
-    assert "chars//4 estimate" in capsys.readouterr().out
+    with pytest.raises(ValueError, match="bad template"):
+        _captured_kwargs(handler)
+    handler.client.chat.completions.create.assert_not_called()
 
 
 def test_query_counts_the_prompt_as_sent():
