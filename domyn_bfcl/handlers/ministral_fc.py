@@ -167,7 +167,7 @@ class MinistralFCHandler(DomynOSSMixin):
     @override
     def _pre_query_processing_prompting(self, test_entry: dict) -> dict:
         functions: list = test_entry["function"]
-        return {"message": [], "function": functions}
+        return {"message": [], "function": functions, **self._session_data(test_entry)}
 
     @staticmethod
     def generate_random_string() -> str:

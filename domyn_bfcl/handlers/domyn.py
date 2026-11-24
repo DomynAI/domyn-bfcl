@@ -209,6 +209,7 @@ class DomynHandler(DomynOSSMixin):
         # default: an unset max_tokens means "as much as the window allows".
         kwargs["max_tokens"] = self._budget_completion(*self._count_prompt(messages, tools))
 
+        kwargs.update(self._session_request_options(inference_data, kwargs["extra_body"]))
         api_response, latency = self.generate_with_backoff(**kwargs)
         self._record_finish(api_response)
 
@@ -327,7 +328,7 @@ class DomynHandler(DomynOSSMixin):
     def _pre_query_processing_prompting(self, test_entry: dict) -> dict:
         functions: list = test_entry["function"]
         # FC models use its own system prompt, so no need to add any message
-        return {"message": [], "function": functions}
+        return {"message": [], "function": functions, **self._session_data(test_entry)}
 
     @override
     def _format_prompt(self, messages, function):

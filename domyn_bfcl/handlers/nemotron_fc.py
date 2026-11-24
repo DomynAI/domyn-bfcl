@@ -219,7 +219,7 @@ The available functions are defined between <AVAILABLE_TOOLS> and </AVAILABLE_TO
     def _pre_query_processing_prompting(self, test_entry: dict) -> dict:
         # Skip generic BFCL system prompt injection; _format_prompt handles it
         # via the Nemotron-specific system prompt + <AVAILABLE_TOOLS> from the jinja template.
-        return {"message": [], "function": test_entry["function"]}
+        return {"message": [], "function": test_entry["function"], **self._session_data(test_entry)}
 
     @override
     def _format_prompt(self, messages, function):
