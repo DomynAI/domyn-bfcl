@@ -6,7 +6,7 @@ from domyn_bfcl.handlers.chat_fc import ChatFCHandler
 
 
 def _response(tool_calls=None, content=None):
-    message = MagicMock(content=content, tool_calls=tool_calls, reasoning_content=None)
+    message = MagicMock(content=content, tool_calls=tool_calls, reasoning_content=None, reasoning=None)
     return MagicMock(
         choices=[MagicMock(message=message)],
         usage=MagicMock(prompt_tokens=10, completion_tokens=5),

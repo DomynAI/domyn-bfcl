@@ -93,7 +93,8 @@ MODEL_CONFIGS = {
         "https://huggingface.co/Qwen/Qwen3.5-4B",
         "Qwen",
         "apache-2.0",
-        DomynQwenFCHandler,
+        ChatFCHandler,
+        underscore_to_dot=True,
     ),
     "Qwen/Qwen3.5-4B-Base-FC": _oss(
         "Qwen/Qwen3.5-4B-Base",
@@ -101,7 +102,8 @@ MODEL_CONFIGS = {
         "https://huggingface.co/Qwen/Qwen3.5-4B-Base",
         "Qwen",
         "apache-2.0",
-        DomynQwenFCHandler,
+        ChatFCHandler,
+        underscore_to_dot=True,
     ),
     "Qwen/Qwen3.5-9B-FC": _oss(
         "Qwen/Qwen3.5-9B",
@@ -109,7 +111,8 @@ MODEL_CONFIGS = {
         "https://huggingface.co/Qwen/Qwen3.5-9B",
         "Qwen",
         "apache-2.0",
-        DomynQwenFCHandler,
+        ChatFCHandler,
+        underscore_to_dot=True,
     ),
     "Nanbeige4.1-3B-FC": _oss(
         "Nanbeige4.1-3B-FC",

@@ -7,6 +7,7 @@ import re
 import time
 from typing import Any
 
+from bfcl_eval.constants.default_prompts import DEFAULT_USER_PROMPT_FOR_ADDITIONAL_FUNCTION_FC
 from bfcl_eval.constants.enums import ModelStyle
 from bfcl_eval.constants.type_mappings import GORILLA_TO_OPENAPI
 from bfcl_eval.model_handler.utils import (
@@ -77,6 +78,55 @@ def _parse_xml_tool_calls(text: str, coerce: bool = True) -> list[dict]:
     ]
 
 
+def _native_tool_calls(tool_calls) -> list[dict] | None:
+    """The response's tool calls as OpenAI ``tool_calls`` to replay in the chat history.
+
+    Arguments stay JSON strings, as the API takes them; the server decodes them before
+    rendering. ``None`` if any call's arguments are not a JSON object: chat templates
+    iterate them as a mapping, and the server would reject the replayed history.
+    """
+    replay = []
+    for index, tc in enumerate(tool_calls):
+        try:
+            arguments = json.loads(tc.function.arguments or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(arguments, dict):
+            return None
+        call_id = tc.id if isinstance(tc.id, str) and tc.id else f"call_{index}"
+        replay.append(
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"},
+            }
+        )
+    return replay
+
+
+def _as_server_renders(messages: list[dict]) -> list[dict]:
+    """``messages`` as vLLM hands them to the chat template, for the local prompt count.
+
+    vLLM decodes each replayed tool call's arguments to a dict (templates iterate them
+    as a mapping), and passes an assistant message's ``reasoning`` to the template as
+    ``reasoning_content``; the local tokenizer does neither.
+    """
+    rendered = []
+    for message in messages:
+        if message.get("tool_calls"):
+            message = {
+                **message,
+                "tool_calls": [
+                    {**tc, "function": {**tc["function"], "arguments": json.loads(tc["function"]["arguments"])}}
+                    for tc in message["tool_calls"]
+                ],
+            }
+        if message.get("reasoning") is not None:
+            message = {**message, "reasoning_content": message["reasoning"]}
+        rendered.append(message)
+    return rendered
+
+
 def split_reasoning(text: str) -> tuple[str, str]:
     """Split an inline ``<think>...</think>`` prefix off a response.
 
@@ -98,7 +148,9 @@ class DomynHandler(DomynOSSMixin):
     (Domyn Edge's <function=...> XML, Domyn Small's <tool_call> JSON), and the run's
     chat_template_kwargs, with its thinking mode, reach that template. Tool call responses
     are serialised back to <tool_call> JSON for decode_ast / decode_execute, which
-    also read raw <function=...> XML left in the content.
+    also read raw <function=...> XML left in the content; the chat history replays them
+    as native tool_calls, with tool_call_id on the results, so the template renders them
+    in the model's own format.
     """
 
     def __init__(
@@ -125,10 +177,14 @@ class DomynHandler(DomynOSSMixin):
     # -------------------------------------------------------------------------
 
     def _chat_template_kwargs(self) -> dict:
-        """The run's chat_template_kwargs, with its thinking mode; preserve_thinking defaults to on."""
+        """The run's chat_template_kwargs, with its thinking mode; preserve_thinking defaults to off.
+
+        Off, the template renders past thinking only for the current turn's steps; on, for every
+        turn, which makes multi-turn prompts much longer.
+        """
         generation = self.generation_config
         return {
-            "preserve_thinking": True,
+            "preserve_thinking": False,
             **(generation.chat_template_kwargs or {}),
             "enable_thinking": generation.enable_thinking,
         }
@@ -140,7 +196,7 @@ class DomynHandler(DomynOSSMixin):
         inference error: the server renders it with the same template.
         """
         prompt = self.tokenizer.apply_chat_template(
-            conversation=messages,
+            conversation=_as_server_renders(messages),
             tools=tools or None,
             tokenize=True,
             add_generation_prompt=True,
@@ -210,7 +266,9 @@ class DomynHandler(DomynOSSMixin):
         message = choice.message
         tool_calls = message.tool_calls or []
 
-        # Serialise to <tool_call> XML — compatible with decode_ast / decode_execute
+        # Serialise to <tool_call> JSON for decode_ast / decode_execute only; the chat
+        # history replays the native tool calls, which the template renders in the
+        # model's own format.
         parts = []
         for tc in tool_calls:
             fn = tc.function
@@ -231,13 +289,25 @@ class DomynHandler(DomynOSSMixin):
         # holds the raw <function=...> XML; decode_ast parses either shape.
         model_responses = "\n".join(parts) if parts else content
 
+        # Native tool calls go back into the history as tool_calls with their ids, and
+        # their results as tool messages carrying those ids. Raw XML left in the content,
+        # or calls whose arguments are not a JSON object, replay as plain content.
+        replay = _native_tool_calls(tool_calls) if tool_calls else None
+        if replay:
+            history_message = {"role": "assistant", "content": content, "tool_calls": replay}
+        else:
+            history_message = {"role": "assistant", "content": model_responses}
+        # The thinking goes back too, as vLLM takes it (``reasoning``); the chat template
+        # decides which turns render it (the current turn's steps; every turn with
+        # preserve_thinking).
+        if reasoning_content:
+            history_message["reasoning"] = reasoning_content
+
         return {
             "model_responses": model_responses,
             "reasoning_content": reasoning_content,
-            "model_responses_message_for_chat_history": {
-                "role": "assistant",
-                "content": model_responses,
-            },
+            "model_responses_message_for_chat_history": history_message,
+            "tool_call_ids": [tc["id"] for tc in replay] if replay else [],
             "input_token": api_response.usage.prompt_tokens if api_response.usage else 0,
             "output_token": api_response.usage.completion_tokens if api_response.usage else 0,
         }
@@ -248,14 +318,7 @@ class DomynHandler(DomynOSSMixin):
 
     @override
     def _add_assistant_message_prompting(self, inference_data: dict, model_response_data: dict) -> dict:
-        # Store the assistant response as XML content, not as a native tool_calls
-        # object.
-        inference_data["message"].append(
-            {
-                "role": "assistant",
-                "content": model_response_data["model_responses"],
-            }
-        )
+        inference_data["message"].append(model_response_data["model_responses_message_for_chat_history"])
         return inference_data
 
     @override
@@ -265,13 +328,16 @@ class DomynHandler(DomynOSSMixin):
         execution_results: list[str],
         model_response_data: dict,
     ) -> dict:
-        for execution_result in execution_results:
-            inference_data["message"].append(
-                {
-                    "role": "tool",
-                    "content": str(execution_result),
-                }
-            )
+        # One result per decoded call, in order: the ids pair up whenever the calls came
+        # back natively. Results of calls parsed out of raw content have no id.
+        tool_call_ids = model_response_data.get("tool_call_ids") or []
+        if len(tool_call_ids) != len(execution_results):
+            tool_call_ids = [None] * len(execution_results)
+        for execution_result, tool_call_id in zip(execution_results, tool_call_ids, strict=True):
+            tool_message = {"role": "tool", "content": str(execution_result)}
+            if tool_call_id is not None:
+                tool_message["tool_call_id"] = tool_call_id
+            inference_data["message"].append(tool_message)
         return inference_data
 
     # -------------------------------------------------------------------------
@@ -311,9 +377,39 @@ class DomynHandler(DomynOSSMixin):
 
     @override
     def _pre_query_processing_prompting(self, test_entry: dict) -> dict:
-        functions: list = test_entry["function"]
+        # A copy: held-out functions are added to it as their turns arrive.
+        functions: list = list(test_entry["function"])
         # FC models use its own system prompt, so no need to add any message
-        return {"message": [], "function": functions, **self._session_data(test_entry)}
+        return {
+            "message": [],
+            "function": functions,
+            "missed_function": test_entry.get("missed_function", {}),
+            "turn_index": 0,
+            **self._session_data(test_entry),
+        }
+
+    # OSSHandler.inference always runs upstream's prompting loop, which only lists a
+    # held-out function in the user text of its turn. This handler sends native tools=,
+    # so, as upstream's FC loop does, the functions join the tools on that turn and the
+    # user message is the FC one.
+    def _release_missed_functions(self, inference_data: dict, user_message: list[dict]) -> list[dict]:
+        """Add the current turn's held-out functions to the tools; return the turn's user message."""
+        missed = inference_data.get("missed_function", {}).get(str(inference_data.get("turn_index", 0)))
+        if not missed:
+            return user_message
+        inference_data["function"].extend(missed)
+        return [{"role": "user", "content": DEFAULT_USER_PROMPT_FOR_ADDITIONAL_FUNCTION_FC}]
+
+    @override
+    def add_first_turn_message_prompting(self, inference_data: dict, first_turn_message: list[dict]) -> dict:
+        first_turn_message = self._release_missed_functions(inference_data, first_turn_message)
+        return super().add_first_turn_message_prompting(inference_data, first_turn_message)
+
+    @override
+    def _add_next_turn_user_message_prompting(self, inference_data: dict, user_message: list[dict]) -> dict:
+        inference_data["turn_index"] = inference_data.get("turn_index", 0) + 1
+        user_message = self._release_missed_functions(inference_data, user_message)
+        return super()._add_next_turn_user_message_prompting(inference_data, user_message)
 
     @override
     def _format_prompt(self, messages, function):

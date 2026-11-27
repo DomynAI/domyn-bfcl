@@ -90,8 +90,9 @@ def _captured_kwargs(handler):
     return handler.client.chat.completions.create.call_args.kwargs
 
 
-def _tool_call(name, arguments):
+def _tool_call(name, arguments, call_id="call_0"):
     tc = MagicMock()
+    tc.id = call_id
     tc.function.name = name
     tc.function.arguments = arguments
     return tc
@@ -184,10 +185,10 @@ def test_query_tools_sent_once_top_level():
 
 def test_query_extra_body_thinking_flags_match_config():
     """enable_thinking from the config must reach the chat template via
-    chat_template_kwargs, preserve_thinking defaults to on, and
+    chat_template_kwargs, preserve_thinking defaults to off, and
     add_generation_prompt is always set."""
     extra = _captured_kwargs(_make_handler())["extra_body"]
-    assert extra["chat_template_kwargs"]["preserve_thinking"] is True
+    assert extra["chat_template_kwargs"]["preserve_thinking"] is False
     assert extra["chat_template_kwargs"]["enable_thinking"] is False
     assert extra["add_generation_prompt"] is True
 
@@ -199,10 +200,10 @@ def test_query_thinking_follows_reasoning_without_enable_thinking(reasoning):
 
 
 def test_query_keeps_every_chat_template_kwarg():
-    cfg = {"chat_template_kwargs": {"preserve_thinking": False, "custom": "x"}}
+    cfg = {"chat_template_kwargs": {"preserve_thinking": True, "custom": "x"}}
     handler = _make_handler(cfg)
     flags = _captured_kwargs(handler)["extra_body"]["chat_template_kwargs"]
-    assert flags == {"preserve_thinking": False, "custom": "x", "enable_thinking": True}
+    assert flags == {"preserve_thinking": True, "custom": "x", "enable_thinking": True}
     assert handler.tokenizer.apply_chat_template.call_args.kwargs["custom"] == "x"
 
 
@@ -308,10 +309,6 @@ def test_parse_tool_call_serialised_to_xml():
     assert out["model_responses"] == (
         '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Boston"}}\n</tool_call>'
     )
-    assert out["model_responses_message_for_chat_history"] == {
-        "role": "assistant",
-        "content": out["model_responses"],
-    }
     assert out["input_token"] == 11
     assert out["output_token"] == 7
 
@@ -484,3 +481,196 @@ def test_decode_execute_renders_xml_call_as_function_string():
         has_tool_call_tag=False,
     )
     assert calls == ["get_user_info(user_id=7890)"]
+
+
+# ── chat history: past calls replay natively, results carry their ids ─────────
+
+
+def _history_after(handler, response, results):
+    parsed = handler._parse_query_response_prompting(response)
+    data = {"message": []}
+    handler._add_assistant_message_prompting(data, parsed)
+    handler._add_execution_results_prompting(data, results, parsed)
+    return data["message"]
+
+
+def test_history_replays_native_tool_calls_with_ids():
+    """The template must render the model's own call format, not <tool_call> JSON text."""
+    response = _mock_response(
+        tool_calls=[
+            _tool_call("get_weather", '{"city": "Boston"}', "call_a"),
+            _tool_call("get_weather", '{"city": "Chicago"}', "call_b"),
+        ]
+    )
+    assistant, *tools = _history_after(_make_handler(), response, ["sunny", "rainy"])
+    assert assistant == {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_a",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": '{"city": "Boston"}'},
+            },
+            {
+                "id": "call_b",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": '{"city": "Chicago"}'},
+            },
+        ],
+    }
+    assert tools == [
+        {"role": "tool", "content": "sunny", "tool_call_id": "call_a"},
+        {"role": "tool", "content": "rainy", "tool_call_id": "call_b"},
+    ]
+
+
+def test_history_keeps_text_before_the_call():
+    response = _mock_response(
+        tool_calls=[_tool_call("get_weather", '{"city": "Boston"}')],
+        content="Let me check.",
+        reasoning="Need the weather.",
+    )
+    assistant, _ = _history_after(_make_handler(), response, ["sunny"])
+    assert assistant["content"] == "Let me check."
+
+
+def test_history_without_server_ids_still_pairs_results():
+    response = _mock_response(tool_calls=[_tool_call("get_weather", '{"city": "Boston"}', call_id=None)])
+    assistant, tool = _history_after(_make_handler(), response, ["sunny"])
+    assert assistant["tool_calls"][0]["id"] == tool["tool_call_id"] == "call_0"
+
+
+def test_history_with_unparsable_arguments_falls_back_to_text():
+    """The server decodes replayed arguments as a JSON object; anything else would be a 400."""
+    response = _mock_response(tool_calls=[_tool_call("get_weather", "not-json")])
+    handler = _make_handler()
+    assistant, tool = _history_after(handler, response, ["error"])
+    assert assistant == {
+        "role": "assistant",
+        "content": handler._parse_query_response_prompting(response)["model_responses"],
+    }
+    assert tool == {"role": "tool", "content": "error"}
+
+
+def test_history_of_raw_xml_content_stays_text_without_ids():
+    """No native calls (the server's parser missed them): the content is already the model's format."""
+    raw = "<tool_call>\n<function=get_weather>\n<parameter=city>\nBoston\n</parameter>\n</function>\n</tool_call>"
+    assistant, tool = _history_after(_make_handler(), _mock_response(content=raw), ["sunny"])
+    assert assistant == {"role": "assistant", "content": raw}
+    assert tool == {"role": "tool", "content": "sunny"}
+
+
+def test_query_counts_replayed_calls_with_decoded_arguments():
+    """The server gets OpenAI's JSON-string arguments; the local count renders them as a
+    dict, as vLLM does before applying a template that iterates them."""
+    handler = _make_handler()
+    response = _mock_response(tool_calls=[_tool_call("get_weather", '{"city": "Boston"}')])
+    messages = [{"role": "user", "content": "Weather in Boston?"}]
+    messages += _history_after(handler, response, ["sunny"])
+    handler._query_prompting({"message": messages, "function": _FUNCTIONS})
+
+    sent = handler.client.chat.completions.create.call_args.kwargs["messages"]
+    assert sent[1]["tool_calls"][0]["function"]["arguments"] == '{"city": "Boston"}'
+    rendered = handler.tokenizer.apply_chat_template.call_args.kwargs["conversation"]
+    assert rendered[1]["tool_calls"][0]["function"]["arguments"] == {"city": "Boston"}
+    assert rendered[2] == sent[2]
+    # the history itself is left as sent
+    assert messages[1]["tool_calls"][0]["function"]["arguments"] == '{"city": "Boston"}'
+
+
+# ── multi_turn_miss_func: held-out functions join the tools on their turn ─────
+
+_HELD_OUT = {
+    "name": "get_forecast",
+    "description": "Get the forecast for a city.",
+    "parameters": {
+        "type": "dict",
+        "properties": {"city": {"type": "string", "description": "City name."}},
+        "required": ["city"],
+    },
+}
+
+
+def _miss_func_entry():
+    return {
+        "id": "multi_turn_miss_func_0",
+        "function": list(_FUNCTIONS),
+        "missed_function": {"2": [_HELD_OUT]},
+    }
+
+
+def _tool_names(handler, inference_data):
+    handler._query_prompting(inference_data)
+    return [t["function"]["name"] for t in handler.client.chat.completions.create.call_args.kwargs["tools"]]
+
+
+def test_held_out_function_joins_the_tools_on_its_turn():
+    handler = _make_handler()
+    entry = _miss_func_entry()
+    data = handler._pre_query_processing_prompting(entry)
+
+    data = handler.add_first_turn_message_prompting(data, [{"role": "user", "content": "Weather in Boston?"}])
+    assert _tool_names(handler, data) == ["get_weather"]
+    data = handler._add_next_turn_user_message_prompting(data, [{"role": "user", "content": "And Chicago?"}])
+    assert _tool_names(handler, data) == ["get_weather"]
+
+    # Upstream's prompting loop hands the holdout turn a user message listing the functions as text
+    announced = [{"role": "user", "content": f"{[_HELD_OUT]}\nI have updated some more functions..."}]
+    data = handler._add_next_turn_user_message_prompting(data, announced)
+    assert _tool_names(handler, data) == ["get_weather", "get_forecast"]
+    # ...which becomes upstream's FC message, since the functions now arrive as tools
+    assert data["message"][-1] == {
+        "role": "user",
+        "content": "I have updated some more functions you can choose from. What about now?",
+    }
+
+    data = handler._add_next_turn_user_message_prompting(data, [{"role": "user", "content": "Thanks."}])
+    assert _tool_names(handler, data) == ["get_weather", "get_forecast"]
+    # the test entry itself is not changed
+    assert entry["function"] == _FUNCTIONS
+
+
+def test_entries_without_held_out_functions_keep_their_messages():
+    handler = _make_handler()
+    data = handler._pre_query_processing_prompting({"id": "multi_turn_base_0", "function": list(_FUNCTIONS)})
+    data = handler.add_first_turn_message_prompting(data, [{"role": "user", "content": "a"}])
+    data = handler._add_next_turn_user_message_prompting(data, [{"role": "user", "content": "b"}])
+    assert data["message"] == [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]
+    assert data["function"] == _FUNCTIONS
+
+
+def test_history_replays_the_thinking_as_vllm_takes_it():
+    """vLLM reads an assistant message's ``reasoning`` (not ``reasoning_content``) into the
+    template; dropping it leaves the current turn's steps, and preserve_thinking, with empty
+    <think> blocks."""
+    response = _mock_response(tool_calls=[_tool_call("get_weather", '{"city": "Boston"}')], reasoning="Need it.")
+    assistant, _ = _history_after(_make_handler(), response, ["sunny"])
+    assert assistant["reasoning"] == "Need it."
+    assert "reasoning_content" not in assistant
+
+    answer, *_ = _history_after(_make_handler(), _mock_response(content="Sunny."), [])
+    assert "reasoning" not in answer
+
+
+def test_query_counts_the_thinking_as_the_template_reads_it():
+    handler = _make_handler()
+    messages = [
+        {"role": "user", "content": "Weather in Boston?"},
+        {"role": "assistant", "content": "Sunny.", "reasoning": "Checked."},
+        {"role": "user", "content": "Thanks!"},
+    ]
+    handler._query_prompting({"message": messages, "function": _FUNCTIONS})
+    rendered = handler.tokenizer.apply_chat_template.call_args.kwargs["conversation"]
+    assert rendered[1]["reasoning_content"] == "Checked."
+    assert "reasoning_content" not in handler.client.chat.completions.create.call_args.kwargs["messages"][1]
+
+
+@pytest.mark.parametrize("model", ["Qwen/Qwen3.5-4B-FC", "Qwen/Qwen3.5-4B-Base-FC", "Qwen/Qwen3.5-9B-FC"])
+def test_qwen3_5_uses_its_own_chat_template(model):
+    """QwenFCHandler hard-codes Qwen3's JSON tool format; Qwen3.5's template uses <function=...> XML."""
+    from domyn_bfcl.handlers.chat_fc import ChatFCHandler
+    from domyn_bfcl.models import MODEL_CONFIGS
+
+    assert MODEL_CONFIGS[model].model_handler is ChatFCHandler
+    assert MODEL_CONFIGS[model].underscore_to_dot
