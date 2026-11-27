@@ -104,13 +104,14 @@ def _native_tool_calls(tool_calls) -> list[dict] | None:
     return replay
 
 
-def _decode_tool_call_arguments(messages: list[dict]) -> list[dict]:
-    """``messages`` with each replayed tool call's arguments decoded to a dict.
+def _as_server_renders(messages: list[dict]) -> list[dict]:
+    """``messages`` as vLLM hands them to the chat template, for the local prompt count.
 
-    vLLM does this before applying the chat template (templates iterate the arguments
-    as a mapping); the local tokenizer does not, so the prompt count does it here.
+    vLLM decodes each replayed tool call's arguments to a dict (templates iterate them
+    as a mapping), and passes an assistant message's ``reasoning`` to the template as
+    ``reasoning_content``; the local tokenizer does neither.
     """
-    decoded = []
+    rendered = []
     for message in messages:
         if message.get("tool_calls"):
             message = {
@@ -120,8 +121,10 @@ def _decode_tool_call_arguments(messages: list[dict]) -> list[dict]:
                     for tc in message["tool_calls"]
                 ],
             }
-        decoded.append(message)
-    return decoded
+        if message.get("reasoning") is not None:
+            message = {**message, "reasoning_content": message["reasoning"]}
+        rendered.append(message)
+    return rendered
 
 
 def split_reasoning(text: str) -> tuple[str, str]:
@@ -174,10 +177,14 @@ class DomynHandler(DomynOSSMixin):
     # -------------------------------------------------------------------------
 
     def _chat_template_kwargs(self) -> dict:
-        """The run's chat_template_kwargs, with its thinking mode; preserve_thinking defaults to on."""
+        """The run's chat_template_kwargs, with its thinking mode; preserve_thinking defaults to off.
+
+        Off, the template renders past thinking only for the current turn's steps; on, for every
+        turn, which makes multi-turn prompts much longer.
+        """
         generation = self.generation_config
         return {
-            "preserve_thinking": True,
+            "preserve_thinking": False,
             **(generation.chat_template_kwargs or {}),
             "enable_thinking": generation.enable_thinking,
         }
@@ -189,7 +196,7 @@ class DomynHandler(DomynOSSMixin):
         inference error: the server renders it with the same template.
         """
         prompt = self.tokenizer.apply_chat_template(
-            conversation=_decode_tool_call_arguments(messages),
+            conversation=_as_server_renders(messages),
             tools=tools or None,
             tokenize=True,
             add_generation_prompt=True,
@@ -290,6 +297,11 @@ class DomynHandler(DomynOSSMixin):
             history_message = {"role": "assistant", "content": content, "tool_calls": replay}
         else:
             history_message = {"role": "assistant", "content": model_responses}
+        # The thinking goes back too, as vLLM takes it (``reasoning``); the chat template
+        # decides which turns render it (the current turn's steps; every turn with
+        # preserve_thinking).
+        if reasoning_content:
+            history_message["reasoning"] = reasoning_content
 
         return {
             "model_responses": model_responses,

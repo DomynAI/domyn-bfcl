@@ -185,10 +185,10 @@ def test_query_tools_sent_once_top_level():
 
 def test_query_extra_body_thinking_flags_match_config():
     """enable_thinking from the config must reach the chat template via
-    chat_template_kwargs, preserve_thinking defaults to on, and
+    chat_template_kwargs, preserve_thinking defaults to off, and
     add_generation_prompt is always set."""
     extra = _captured_kwargs(_make_handler())["extra_body"]
-    assert extra["chat_template_kwargs"]["preserve_thinking"] is True
+    assert extra["chat_template_kwargs"]["preserve_thinking"] is False
     assert extra["chat_template_kwargs"]["enable_thinking"] is False
     assert extra["add_generation_prompt"] is True
 
@@ -200,10 +200,10 @@ def test_query_thinking_follows_reasoning_without_enable_thinking(reasoning):
 
 
 def test_query_keeps_every_chat_template_kwarg():
-    cfg = {"chat_template_kwargs": {"preserve_thinking": False, "custom": "x"}}
+    cfg = {"chat_template_kwargs": {"preserve_thinking": True, "custom": "x"}}
     handler = _make_handler(cfg)
     flags = _captured_kwargs(handler)["extra_body"]["chat_template_kwargs"]
-    assert flags == {"preserve_thinking": False, "custom": "x", "enable_thinking": True}
+    assert flags == {"preserve_thinking": True, "custom": "x", "enable_thinking": True}
     assert handler.tokenizer.apply_chat_template.call_args.kwargs["custom"] == "x"
 
 
@@ -638,3 +638,39 @@ def test_entries_without_held_out_functions_keep_their_messages():
     data = handler._add_next_turn_user_message_prompting(data, [{"role": "user", "content": "b"}])
     assert data["message"] == [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]
     assert data["function"] == _FUNCTIONS
+
+
+def test_history_replays_the_thinking_as_vllm_takes_it():
+    """vLLM reads an assistant message's ``reasoning`` (not ``reasoning_content``) into the
+    template; dropping it leaves the current turn's steps, and preserve_thinking, with empty
+    <think> blocks."""
+    response = _mock_response(tool_calls=[_tool_call("get_weather", '{"city": "Boston"}')], reasoning="Need it.")
+    assistant, _ = _history_after(_make_handler(), response, ["sunny"])
+    assert assistant["reasoning"] == "Need it."
+    assert "reasoning_content" not in assistant
+
+    answer, *_ = _history_after(_make_handler(), _mock_response(content="Sunny."), [])
+    assert "reasoning" not in answer
+
+
+def test_query_counts_the_thinking_as_the_template_reads_it():
+    handler = _make_handler()
+    messages = [
+        {"role": "user", "content": "Weather in Boston?"},
+        {"role": "assistant", "content": "Sunny.", "reasoning": "Checked."},
+        {"role": "user", "content": "Thanks!"},
+    ]
+    handler._query_prompting({"message": messages, "function": _FUNCTIONS})
+    rendered = handler.tokenizer.apply_chat_template.call_args.kwargs["conversation"]
+    assert rendered[1]["reasoning_content"] == "Checked."
+    assert "reasoning_content" not in handler.client.chat.completions.create.call_args.kwargs["messages"][1]
+
+
+@pytest.mark.parametrize("model", ["Qwen/Qwen3.5-4B-FC", "Qwen/Qwen3.5-4B-Base-FC", "Qwen/Qwen3.5-9B-FC"])
+def test_qwen3_5_uses_its_own_chat_template(model):
+    """QwenFCHandler hard-codes Qwen3's JSON tool format; Qwen3.5's template uses <function=...> XML."""
+    from domyn_bfcl.handlers.chat_fc import ChatFCHandler
+    from domyn_bfcl.models import MODEL_CONFIGS
+
+    assert MODEL_CONFIGS[model].model_handler is ChatFCHandler
+    assert MODEL_CONFIGS[model].underscore_to_dot

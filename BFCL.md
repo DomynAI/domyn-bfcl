@@ -53,7 +53,7 @@ which `generate` gets as `--temperature` (an explicit `--temperature` must match
 | Key | Default | Use |
 | --- | --- | --- |
 | `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `repetition_penalty`, `frequency_penalty` | unset | sampling; unset is not sent |
-| `chat_template_kwargs` | unset | sent to the chat template as given, with `enable_thinking` set from the thinking mode (`DomynHandler` also defaults `preserve_thinking` to on) |
+| `chat_template_kwargs` | unset | sent to the chat template as given, with `enable_thinking` set from the thinking mode (`DomynHandler` also defaults `preserve_thinking` to off: past thinking renders only for the current turn's steps) |
 | `reasoning` | `true` | the thinking mode when `chat_template_kwargs` has no `enable_thinking` |
 | `max_model_len`, `max_tokens` | unset, unset | completion budget |
 | `request_timeout` | 3600 | seconds per request |
